@@ -3,6 +3,13 @@
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
 #include <EEPROM.h>
+#include <SoftwareSerial.h>
+
+// Configuración Bluetooth en pines analógicos
+// Conecta: HC-05 TXD -> Arduino A0
+// Conecta: HC-05 RXD -> Arduino A1 (Usar divisor de voltaje 1k/2k)
+SoftwareSerial BT(A0, A1); 
+
 
 // Pines de Salida
 const int PIN_SALA = 2;
@@ -55,6 +62,7 @@ const int DIR_ESCENA_CUSTOM = 510;
 bool confIniRecibido = false;
 int direccionCargaActual = -1;
 String mensajeEscenaActual = "";
+String mensajeLCD_L2 = ""; // Segunda línea personalizada
 bool fanInicialEscena = false;
 
 // Variables Para el Sistema de Escenas
@@ -66,18 +74,21 @@ struct PasoEscena{
   unsigned int duracion; // en milisegundos
   byte repeticiones;
 };
-PasoEscena pasosEscena[15]; 
+PasoEscena pasosEscena[10]; // Reducido de 15 a 10 para ahorrar RAM
 int totalPasos = 0;
 
 // Variables para ejecucion no bloqueante de escenas
-unsigned long ultimosTiempos[15];
-int repeticionesActuales[15];
-bool estadoLuces[15];
+unsigned long ultimosTiempos[10];
+int repeticionesActuales[10];
+bool estadoLuces[10];
 bool escenaIniciada = false;
 
 void setup() {
   Serial.begin(9600);
-  Serial.setTimeout(100); // Evita que readStringUntil bloquee las escenas
+  Serial.setTimeout(500); 
+  
+  BT.begin(9600); // Inicializar Bluetooth a 9600 baudios
+  BT.setTimeout(500);
 
   pinMode(PIN_SALA, OUTPUT);  
   pinMode(PIN_COMEDOR, OUTPUT);  
@@ -96,7 +107,7 @@ void setup() {
   lcd.backlight();
 
   // Inicializar EEPROM si es la primera vez (Formateo)
-  if (EEPROM.read(DIR_MAGIC) != 0xAA) {
+  if (EEPROM.read(DIR_MAGIC) != 0xAB) {
     Serial.println(F("Inicializando EEPROM por primera vez..."));
     inicializarEEPROM();
   }
@@ -112,17 +123,16 @@ void loop() {
   gestionarLEDsStatus();
   verificarBotonPuerta();
 
+  // Leer comandos desde el Monitor Serial (PC)
   if (Serial.available() > 0){
     comando = Serial.readStringUntil('\n'); 
-    comando.trim();
-    comando.toUpperCase();
-    
-    // Ignorar Bluetooth durante carga .org
-    if(modoCarga){
-      procesarLineaEscena(comando);
-    } else {
-      interpretarComando(comando);
-    }
+    procesarComandoEntrante(comando);
+  }
+
+  // Leer comandos desde el Bluetooth (Celular)
+  if (BT.available() > 0){
+    comando = BT.readStringUntil('\n');
+    procesarComandoEntrante(comando);
   }
  
   if (escenaActiva){
@@ -136,48 +146,85 @@ void loop() {
   }
 }
 
+// Función auxiliar para centralizar el procesamiento de comandos
+void procesarComandoEntrante(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase(); // Volver a hacer que no importe si es mayúscula o minúscula
+  
+  if(modoCarga){
+    procesarLineaEscena(cmd);
+  } else {
+    interpretarComando(cmd);
+  }
+}
+
 void interpretarComando(String cmd){
   bool procesado = true;
   
-  if (cmd == "L1" || cmd == "L1ON") { digitalWrite(PIN_SALA,HIGH); }
-  else if (cmd == "L1OFF") { digitalWrite(PIN_SALA,LOW); }
-  else if (cmd == "L2" || cmd == "L2ON") { digitalWrite(PIN_COMEDOR,HIGH); }
-  else if (cmd == "L2OFF") { digitalWrite(PIN_COMEDOR,LOW); }
-  else if (cmd == "L3" || cmd == "L3ON") { digitalWrite(PIN_COCINA,HIGH); }
-  else if (cmd == "L3OFF") { digitalWrite(PIN_COCINA,LOW); }
-  else if (cmd == "L4" || cmd == "L4ON") { digitalWrite(PIN_BANO,HIGH); }
-  else if (cmd == "L4OFF") { digitalWrite(PIN_BANO,LOW); }
-  else if (cmd == "L5" || cmd == "L5ON") { digitalWrite(PIN_HAB,HIGH); }
-  else if (cmd == "L5OFF") { digitalWrite(PIN_HAB,LOW); }
-  else if (cmd == "ENCENDER_TODO" || cmd == "ENCENDER TODO") { cargarEscenaDesdeEEPROM(DIR_ESCENA_ENCENDER, "Encender Todo"); }
-  else if (cmd == "APAGAR_TODO" || cmd == "APAGAR TODO") { cargarEscenaDesdeEEPROM(DIR_ESCENA_APAGAR, "Apagar Todo"); }
-  else if (cmd == "FANON" || cmd == "FAN_ON") { setVentilador(true); }
-  else if (cmd == "FANOFF" || cmd == "FAN_OFF") { setVentilador(false); }
-  else if (cmd == "DOOR") { togglePuerta(); }
-  else if (cmd == "DOOROPEN") { moverPuerta(true); }
-  else if (cmd == "DOORCLOSE") { moverPuerta(false); }
-  else if (cmd == "MODO_FIESTA" || cmd == "FIESTA") { cargarEscenaDesdeEEPROM(DIR_ESCENA_FIESTA, "Fiesta"); }
-  else if (cmd == "MODO_RELAJADO" || cmd == "RELAX") { cargarEscenaDesdeEEPROM(DIR_ESCENA_RELAJADO, "Relajado"); }
-  else if (cmd == "MODO_NOCHE" || cmd == "NIGHT") { cargarEscenaDesdeEEPROM(DIR_ESCENA_NOCHE, "Noche"); }
-  else if (cmd == "LOAD_SCENA") {
+  if (cmd == "SALA: ON") { digitalWrite(PIN_SALA,HIGH); escenaActiva = false; }
+  else if (cmd == "SALA: OFF") { digitalWrite(PIN_SALA,LOW); escenaActiva = false; }
+  else if (cmd == "SALA") { digitalWrite(PIN_SALA, !digitalRead(PIN_SALA)); escenaActiva = false; }
+
+  else if (cmd == "COMEDOR: ON" ) { digitalWrite(PIN_COMEDOR,HIGH); escenaActiva = false; }
+  else if (cmd == "COMEDOR: OFF") { digitalWrite(PIN_COMEDOR,LOW); escenaActiva = false; }
+  else if (cmd == "COMEDOR") { digitalWrite(PIN_COMEDOR, !digitalRead(PIN_COMEDOR)); escenaActiva = false; }
+
+  else if (cmd == "COCINA: ON") { digitalWrite(PIN_COCINA,HIGH); escenaActiva = false; }
+  else if (cmd == "COCINA: OFF") { digitalWrite(PIN_COCINA,LOW); escenaActiva = false; }
+  else if (cmd == "COCINA") { digitalWrite(PIN_COCINA, !digitalRead(PIN_COCINA)); escenaActiva = false; }
+
+  else if (cmd == "BANO: ON") { digitalWrite(PIN_BANO,HIGH); escenaActiva = false; }
+  else if (cmd == "BANO: OFF") { digitalWrite(PIN_BANO,LOW); escenaActiva = false; }
+  else if (cmd == "BANO") { digitalWrite(PIN_BANO, !digitalRead(PIN_BANO)); escenaActiva = false; }
+
+  else if (cmd == "HABITACION: ON") { digitalWrite(PIN_HAB,HIGH); escenaActiva = false; }
+  else if (cmd == "HABITACION: OFF") { digitalWrite(PIN_HAB,LOW); escenaActiva = false; }
+  else if (cmd == "HABITACION") { digitalWrite(PIN_HAB, !digitalRead(PIN_HAB)); escenaActiva = false; }
+
+  else if (cmd == "VENTILADOR: ON") { setVentilador(true); escenaActiva = false; }
+  else if (cmd == "VENTILADOR: OFF") { setVentilador(false); escenaActiva = false; }
+  else if (cmd == "VENTILADOR") { setVentilador(!ventiladorEncendido); escenaActiva = false; }
+
+  else if (cmd == "ENCENDER_TODO") { cargarEscenaDesdeEEPROM(DIR_ESCENA_ENCENDER, "Encender Todo"); }
+  else if (cmd == "APAGAR_TODO") { cargarEscenaDesdeEEPROM(DIR_ESCENA_APAGAR, "Apagar Todo"); }
+
+  else if (cmd == "PUERTA: ON") { moverPuerta(true); }
+  else if (cmd == "PUERTA: OFF") { moverPuerta(false); }
+  else if (cmd == "PUERTA") { togglePuerta(); }
+
+  else if (cmd == "MODO_FIESTA") { cargarEscenaDesdeEEPROM(DIR_ESCENA_FIESTA, "Fiesta"); }
+  else if (cmd == "MODO_RELAJADO") { cargarEscenaDesdeEEPROM(DIR_ESCENA_RELAJADO, "Relajado"); }
+  else if (cmd == "MODO_NOCHE") { cargarEscenaDesdeEEPROM(DIR_ESCENA_NOCHE, "Noche"); }
+  else if (cmd == "CARGAR_ESCENA") {
     modoCarga = true;
     confIniRecibido = false;
     totalPasos = 0;
     direccionCargaActual = DIR_ESCENA_CUSTOM; // Por defecto
-    enviarConfirmacion("ESPERANDO conf_ini...");
+    enviarConfirmacion(F("ESPERANDO conf_ini..."));
   }
   else if(cmd == "STOP"){
     escenaActiva = false;
     escenaIniciada = false;
     nombreEscena = "Manual";
   }
-  else if(cmd == "STATUS" || cmd == "ESTADO"){ imprimirEstado(); }
+  else if(cmd == "ESTADO"){ imprimirEstado(); }
   else if(cmd == "RESET"){ resetSistema(); }
-  else if(cmd == "FORMAT"){ inicializarEEPROM(); Serial.println(F("OK: EEPROM RESTAURADA")); }
+  else if(cmd == "FORMATEAR"){ 
+    String msgProgreso = F("PROCESANDO: Borrando memoria EEPROM...");
+    Serial.println(msgProgreso);
+    BT.println(msgProgreso);
+    inicializarEEPROM(); 
+    enviarConfirmacion(F("EEPROM RESTAURADA")); 
+    procesado = true;
+  }
   else if(cmd == "PLAY_SCENA"){ cargarEscenaDesdeEEPROM(DIR_ESCENA_CUSTOM, "Custom EEPROM"); }
   else {
     procesado = false;
-    Serial.println(F("ERROR: Comando Desconocido"));
+    errorSistema = true;
+    mensajeEscenaActual = "ERROR:";
+    mensajeLCD_L2 = "Modo invalido";
+    Serial.println(F("ERROR: Modo invalido"));
+    BT.println(F("ERROR: Modo invalido"));
   }
 
   if(procesado){
@@ -191,12 +238,28 @@ void interpretarComando(String cmd){
 void enviarConfirmacion(String accion) {
   Serial.print(F("OK: "));
   Serial.println(accion);
-  // El LCD se actualiza automaticamente al final de interpretarComando
+  BT.print(F("OK: "));
+  BT.println(accion);
+}
+
+void enviarConfirmacion(const __FlashStringHelper* accion) {
+  Serial.print(F("OK: "));
+  Serial.println(accion);
+  BT.print(F("OK: "));
+  BT.println(accion);
 }
 
 void gestionarLEDsStatus() {
-  // LED Azul encendido siempre que el sistema procesa
-  digitalWrite(PIN_LED_AZUL, HIGH);
+  // LED Azul - Efecto de Latido (Heartbeat)
+  // Como el Pin 7 no es PWM, usamos un patrón de parpadeo rítmico cada 2 segundos
+  unsigned long currentMillis = millis();
+  static unsigned long lastHeartbeat = 0;
+  if (currentMillis - lastHeartbeat >= 2000) lastHeartbeat = currentMillis;
+
+  unsigned long elapsed = currentMillis - lastHeartbeat;
+  // Doble destello corto
+  bool heartbeatState = (elapsed < 80) || (elapsed > 200 && elapsed < 280);
+  digitalWrite(PIN_LED_AZUL, heartbeatState ? HIGH : LOW);
   
   // LED Rojo de Error
   if (errorSistema) {
@@ -238,7 +301,7 @@ void moverPuerta(bool abrir){
   if (!puertaServo.attached()) {
     puertaServo.attach(PIN_SERVO);
   }
-  puertaServo.write(abrir ? 20 : 0);
+  puertaServo.write(abrir ? 90 : 0); // Ajustado a 90 grados para apertura completa
   tiempoServo = millis();
   servoEnMovimiento = true;
 }
@@ -263,7 +326,9 @@ void verificarBotonPuerta() {
         togglePuerta();
         actualizarLCD();
         guardarEstadoActual();
-        Serial.println(F("OK: BOTON FISICO DETECTADO - PUERTA MOVIDA"));
+        String msgBoton = F("PUERTA ABIERTA / CERRADA");
+        Serial.println(msgBoton);
+        BT.println(msgBoton);
       }
     }
   }
@@ -301,7 +366,22 @@ void procesarLineaEscena(String linea){
     totalPasos = 0;
     mensajeEscenaActual = "Modo: Cargando";
     fanInicialEscena = false;
-    Serial.println(F("OK: conf_ini detectado"));
+
+    // Animación estética en LCD al recibir configuración (Punto 3)
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print(F("Leyendo .org..."));
+    for(int i=0; i<16; i++) {
+      lcd.setCursor(i, 1);
+      lcd.print((char)0xFF); // Carácter de bloque lleno
+      delay(20); 
+    }
+    delay(200);
+    actualizarLCD();
+
+    String msgIni = F("OK: conf_ini detectado");
+    Serial.println(msgIni);
+    BT.println(msgIni);
     return;
   }
 
@@ -341,10 +421,7 @@ void procesarLineaEscena(String linea){
   if (lineaUpper.startsWith("COMEDOR:")) { agregarPasoManual(PIN_COMEDOR, lineaUpper.indexOf("ON") != -1, 100, 0); return; }
   if (lineaUpper.startsWith("COCINA:")) { agregarPasoManual(PIN_COCINA, lineaUpper.indexOf("ON") != -1, 100, 0); return; }
   if (lineaUpper.startsWith("BANO:")) { agregarPasoManual(PIN_BANO, lineaUpper.indexOf("ON") != -1, 100, 0); return; }
-  if (lineaUpper.startsWith("HABITACION:") || lineaUpper.startsWith("HAB:")) { 
-    agregarPasoManual(PIN_HAB, lineaUpper.indexOf("ON") != -1, 100, 0); 
-    return; 
-  }
+  if (lineaUpper.startsWith("HABITACION:")) { agregarPasoManual(PIN_HAB, lineaUpper.indexOf("ON") != -1, 100, 0); return; }
 
   // 5. Patrón de LEDs (Alternandose)
   if (linea.startsWith("LED'S:")) {
@@ -364,6 +441,9 @@ void procesarLineaEscena(String linea){
     guardarEscenaEnEEPROM(direccionCargaActual);
     modoCarga = false;
     confIniRecibido = false;
+    mensajeEscenaActual = "Modo: Cargando";
+    mensajeLCD_L2 = "";
+    fanInicialEscena = false;
     errorSistema = false;
     iniciarParpadeoVerde();
     enviarConfirmacion("CARGA FINALIZADA");
@@ -372,7 +452,7 @@ void procesarLineaEscena(String linea){
 }
 
 void agregarPasoManual(byte pin, bool estado, int dur, byte rep) {
-  if (totalPasos < 15) {
+  if (totalPasos < 10) {
     pasosEscena[totalPasos].pin = pin;
     pasosEscena[totalPasos].estado = estado;
     pasosEscena[totalPasos].duracion = dur;
@@ -382,7 +462,9 @@ void agregarPasoManual(byte pin, bool estado, int dur, byte rep) {
 }
 
 void marcarErrorArchivo() {
-  Serial.println(F("Error: Formato .org invalido o falta conf_ini."));
+  String errorMsg = F("Error: Formato .org invalido o falta conf_ini.");
+  Serial.println(errorMsg);
+  BT.println(errorMsg);
   errorSistema = true; 
   modoCarga = false;
   lcd.clear();
@@ -394,7 +476,7 @@ byte getPinFromAmbiente(String amb){
   if(amb == "COMEDOR") return PIN_COMEDOR;
   if(amb == "COCINA") return PIN_COCINA;
   if(amb == "BANO") return PIN_BANO;
-  if(amb == "HABITACION" || amb == "HAB") return PIN_HAB;
+  if(amb == "HABITACION") return PIN_HAB;
   if(amb == "VENTILADOR") return PIN_FAN;
   return 0;
 }
@@ -407,29 +489,31 @@ void inicializarEEPROM() {
   // Guardar "Fiesta"
   totalPasos = 0;
   nombreEscena = "Fiesta";
-  mensajeEscenaActual = "Modo: FIESTA";
-  fanInicialEscena = false;
+  mensajeEscenaActual = "MODO: FIESTA.";
+  fanInicialEscena = true; // Según tabla: Ventilador ON
   agregarPasoManual(PIN_SALA, true, 500, 40);
   agregarPasoManual(PIN_COMEDOR, false, 500, 40);
   agregarPasoManual(PIN_COCINA, true, 300, 66);
   agregarPasoManual(PIN_BANO, false, 300, 66);
   agregarPasoManual(PIN_HAB, true, 200, 100);
   guardarEscenaEnEEPROM(DIR_ESCENA_FIESTA);
+  // Nota: El mensaje LCD se configura en cargarEscenaDesdeEEPROM
 
   // Guardar "Relax"
   totalPasos = 0;
   nombreEscena = "Relax";
-  mensajeEscenaActual = "Modo: RELAX";
+  mensajeEscenaActual = "MODO: RELAX";
   fanInicialEscena = false;
-  agregarPasoManual(PIN_SALA, true, 2000, 5);
-  agregarPasoManual(PIN_COMEDOR, true, 2000, 5);
-  agregarPasoManual(PIN_HAB, true, 3000, 5);
+  // Según tabla: LED'S OFF
+  agregarPasoManual(PIN_SALA, false, 100, 0);
+  agregarPasoManual(PIN_COMEDOR, false, 100, 0);
+  agregarPasoManual(PIN_HAB, false, 100, 0);
   guardarEscenaEnEEPROM(DIR_ESCENA_RELAJADO);
 
   // Guardar "Noche"
   totalPasos = 0;
   nombreEscena = "Noche";
-  mensajeEscenaActual = "Modo: NOCHE";
+  mensajeEscenaActual = "MODO: NOCHE";
   fanInicialEscena = false;
   agregarPasoManual(PIN_SALA, false, 1000, 1);
   agregarPasoManual(PIN_COMEDOR, false, 1000, 1);
@@ -463,7 +547,7 @@ void inicializarEEPROM() {
   guardarEscenaEnEEPROM(DIR_ESCENA_APAGAR);
 
   // Marcar EEPROM como inicializada
-  EEPROM.update(DIR_MAGIC, 0xAA);
+  EEPROM.update(DIR_MAGIC, 0xAB);
   totalPasos = 0;
 }
 
@@ -510,6 +594,28 @@ void cargarEscenaDesdeEEPROM(int dirBase, String nombre) {
   }
   
   nombreEscena = nombre;
+  
+  // Configurar mensajes según la tabla de la imagen
+  if (dirBase == DIR_ESCENA_FIESTA) {
+    mensajeEscenaActual = "Modo: FIESTA";
+    mensajeLCD_L2 = "Vent: ON LED: ALT";
+  } else if (dirBase == DIR_ESCENA_RELAJADO) {
+    mensajeEscenaActual = "Modo: RELAJADO";
+    mensajeLCD_L2 = "Vent: OFF LED: OFF";
+  } else if (dirBase == DIR_ESCENA_NOCHE) {
+    mensajeEscenaActual = "Modo: NOCHE";
+    mensajeLCD_L2 = "Vent: OFF LED: OFF";
+  } else if (dirBase == DIR_ESCENA_ENCENDER) {
+    mensajeEscenaActual = "LED'S: ON";
+    mensajeLCD_L2 = "Ventilador: ON";
+  } else if (dirBase == DIR_ESCENA_APAGAR) {
+    mensajeEscenaActual = "LED'S: OFF.";
+    mensajeLCD_L2 = "Ventilador: OFF.";
+  } else {
+    // Si no es un modo estándar, usa el mensaje de la EEPROM si existe
+    mensajeLCD_L2 = ""; 
+  }
+
   setVentilador(fanInicialEscena);
   escenaActiva = true;
   escenaIniciada = false;
@@ -540,8 +646,12 @@ void actualizarLCD(){
   }
 
   lcd.setCursor(0,1);
-  lcd.print(ventiladorEncendido ? F("FAN:ON ") : F("FAN:OFF "));
-  lcd.print(puertaAbierta ? F("P:ABR") : F("P:CER"));
+  if (mensajeLCD_L2 != "") {
+    lcd.print(mensajeLCD_L2);
+  } else {
+    lcd.print(ventiladorEncendido ? F("FAN:ON ") : F("FAN:OFF "));
+    lcd.print(puertaAbierta ? F("P:ABR") : F("P:CER"));
+  }
 }
 
 void imprimirEstado(){
@@ -554,6 +664,17 @@ void imprimirEstado(){
   Serial.print(F("FAN : ")); Serial.println(ventiladorEncendido ? F("ON") : F("OFF"));
   Serial.print(F("PUERTA : ")); Serial.println(puertaAbierta ? F("ON") : F("OFF"));
   Serial.print(F("ESCENA : ")); Serial.println(nombreEscena);
+
+  // Enviar también al Bluetooth para visualización en el celular
+  BT.println(F("*** ESTADO ACTUAL DEL SISTEMA ***"));
+  BT.print(F("SALA : ")); BT.println(digitalRead(PIN_SALA) ? F("ON") : F("OFF"));
+  BT.print(F("COMEDOR : ")); BT.println(digitalRead(PIN_COMEDOR) ? F("ON") : F("OFF"));
+  BT.print(F("COCINA : ")); BT.println(digitalRead(PIN_COCINA) ? F("ON") : F("OFF"));
+  BT.print(F("BANO : ")); BT.println(digitalRead(PIN_BANO) ? F("ON") : F("OFF"));
+  BT.print(F("HAB : ")); BT.println(digitalRead(PIN_HAB) ? F("ON") : F("OFF"));
+  BT.print(F("FAN : ")); BT.println(ventiladorEncendido ? F("ON") : F("OFF"));
+  BT.print(F("PUERTA : ")); BT.println(puertaAbierta ? F("ON") : F("OFF"));
+  BT.print(F("ESCENA : ")); BT.println(nombreEscena);
 }
 
 void resetSistema(){
@@ -563,17 +684,19 @@ void resetSistema(){
   escenaActiva = false;
   escenaIniciada = false;
   nombreEscena = "Reset";
-  Serial.println(F("*** Sistema Reiniciado ***"));
+  String msgReset = F("*** Sistema Reiniciado ***");
+  Serial.println(msgReset);
+  BT.println(msgReset);
 }
 
 void listarEscenas(){
   Serial.println(F("*** Escenas Internas EEPROM ***"));
-  Serial.println(F(" >. Fiesta"));
-  Serial.println(F(" >. Relax"));
-  Serial.println(F(" >. Noche"));
-  Serial.println(F(" >. Encender Todo"));
-  Serial.println(F(" >. Apagar Todo"));
-  Serial.println(F(" >. Custom EEPROM"));
+  Serial.println(F("- Fiesta"));
+  Serial.println(F("- Relax"));
+  Serial.println(F("- Noche"));
+  Serial.println(F("- Encender Todo"));
+  Serial.println(F("- Apagar Todo"));
+  Serial.println(F("- Custom EEPROM"));
 }
 
 void ejecutarEscenaNonBlocking(){
